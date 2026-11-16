@@ -16,6 +16,10 @@ class SourceInfo(BaseModel):
     description: str
     base_url: str
     fields: list[str]
+    requires_browser: bool = Field(
+        default=False,
+        description="True when pages must be rendered in Chromium instead of fetched over HTTP",
+    )
 
 
 class ScrapeRequest(BaseModel):
@@ -42,4 +46,8 @@ class ScrapeRunSummary(BaseModel):
     item_count: int
     output_path: str
     errors: list[str] = Field(default_factory=list)
+    screenshots: list[str] = Field(
+        default_factory=list,
+        description="Screenshot files captured by browser-based sources, relative to data/",
+    )
     sample_items: list[dict[str, Any]] = Field(default_factory=list)

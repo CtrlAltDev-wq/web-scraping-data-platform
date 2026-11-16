@@ -1,4 +1,8 @@
-"""HTTP fetching with politeness rules: robots.txt, throttling, retries and caching."""
+"""Fetch strategies: download page HTML, either over HTTP or with a real browser.
+
+A scraper depends on the :class:`Fetcher` protocol only, so switching a source from
+plain HTTP to browser rendering never touches parsing code.
+"""
 
 from __future__ import annotations
 
@@ -6,12 +10,12 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
-from urllib.robotparser import RobotFileParser
+from typing import Protocol
 
 import httpx
 
 from app.core.config import Settings
+from app.scrapers.politeness import HostThrottle, RobotsChecker
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,31 @@ class FetchResult:
     status_code: int
     html: str
     from_cache: bool = False
+    screenshot_path: Path | None = None
+
+
+class Fetcher(Protocol):
+    """What a scraper needs from a fetch strategy.
+
+    Both :class:`HttpFetcher` and
+    :class:`app.scrapers.playwright_fetcher.PlaywrightFetcher` satisfy it. Browser
+    specific arguments are accepted by every implementation so a scraper can call
+    all strategies through the same interface.
+    """
+
+    settings: Settings
+
+    def get(
+        self,
+        url: str,
+        *,
+        cache_path: Path | None = None,
+        use_cache: bool = False,
+        screenshot_path: Path | None = None,
+        wait_for_selector: str | None = None,
+    ) -> FetchResult:
+        """Return the HTML for ``url``."""
+        ...
 
 
 class HttpFetcher:
@@ -47,9 +76,12 @@ class HttpFetcher:
             timeout=settings.request_timeout_seconds,
             follow_redirects=True,
         )
-        # Cache one robots.txt parser per origin and the last request time per host.
-        self._robots: dict[str, RobotFileParser | None] = {}
-        self._last_request_at: dict[str, float] = {}
+        self._robots = RobotsChecker(
+            self._client,
+            settings.user_agent,
+            enabled=settings.respect_robots_txt,
+        )
+        self._throttle = HostThrottle(settings.request_delay_seconds)
 
     def get(
         self,
@@ -57,8 +89,14 @@ class HttpFetcher:
         *,
         cache_path: Path | None = None,
         use_cache: bool = False,
+        screenshot_path: Path | None = None,
+        wait_for_selector: str | None = None,
     ) -> FetchResult:
-        """Download ``url`` as text, optionally reusing a previously saved copy."""
+        """Download ``url`` as text, optionally reusing a previously saved copy.
+
+        ``screenshot_path`` and ``wait_for_selector`` exist only for interface
+        compatibility with the browser fetcher and are ignored here.
+        """
         if use_cache and cache_path is not None and cache_path.exists():
             logger.info("Cache hit: %s", cache_path)
             return FetchResult(
@@ -68,12 +106,12 @@ class HttpFetcher:
                 from_cache=True,
             )
 
-        if self.settings.respect_robots_txt and not self._is_allowed(url):
+        if not self._robots.is_allowed(url):
             raise FetchError(f"Blocked by robots.txt: {url}")
 
         last_error: Exception | None = None
         for attempt in range(1, self.settings.max_retries + 1):
-            self._throttle(url)
+            self._throttle.wait(url)
             try:
                 response = self._client.get(url)
                 response.raise_for_status()
@@ -103,52 +141,3 @@ class HttpFetcher:
         raise FetchError(
             f"Failed to fetch {url} after {self.settings.max_retries} attempts: {last_error}"
         )
-
-    def _throttle(self, url: str) -> None:
-        """Sleep so two requests to the same host are never fired back to back."""
-        host = urlparse(url).netloc
-        last_request = self._last_request_at.get(host)
-        if last_request is not None:
-            elapsed = time.monotonic() - last_request
-            remaining = self.settings.request_delay_seconds - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
-        self._last_request_at[host] = time.monotonic()
-
-    def _is_allowed(self, url: str) -> bool:
-        """Check ``url`` against the host's robots.txt rules."""
-        parsed = urlparse(url)
-        origin = f"{parsed.scheme}://{parsed.netloc}"
-
-        if origin not in self._robots:
-            self._robots[origin] = self._load_robots(origin)
-
-        parser = self._robots[origin]
-        if parser is None:
-            # A missing or unreachable robots.txt means no declared restrictions.
-            return True
-        allowed = parser.can_fetch(self.settings.user_agent, url)
-        if not allowed:
-            logger.warning("robots.txt disallows %s", url)
-        return allowed
-
-    def _load_robots(self, origin: str) -> RobotFileParser | None:
-        robots_url = f"{origin}/robots.txt"
-        parser = RobotFileParser()
-        parser.set_url(robots_url)
-        try:
-            response = self._client.get(robots_url)
-        except httpx.HTTPError as exc:
-            logger.warning("robots.txt unavailable for %s: %s", origin, exc)
-            return None
-
-        if response.status_code != 200:
-            logger.info(
-                "robots.txt returned %s for %s; treating as unrestricted",
-                response.status_code,
-                origin,
-            )
-            return None
-
-        parser.parse(response.text.splitlines())
-        return parser

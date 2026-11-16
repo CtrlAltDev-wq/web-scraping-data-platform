@@ -23,7 +23,7 @@ def make_service(tmp_path: Path, pages: dict[int, str] | None = None) -> ScrapeS
 def test_list_sources_returns_registered_metadata(tmp_path: Path) -> None:
     sources = make_service(tmp_path).list_sources()
 
-    assert len(sources) == 1
+    assert len(sources) == 3
     assert sources[0].key == "books-toscrape"
     assert "price" in sources[0].fields
 

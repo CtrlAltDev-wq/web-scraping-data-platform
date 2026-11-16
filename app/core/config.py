@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "Web Scraping & Data Extraction Platform"
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     environment: str = "development"
     log_level: str = "INFO"
 
@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # Scraping defaults.
     default_max_pages: int = 3
     max_pages_limit: int = 20
+
+    # Browser rendering. Used only by sources that declare ``requires_browser``.
+    browser_headless: bool = True
+    browser_timeout_ms: int = 30_000
 
     # Storage. Raw HTML, run outputs and future exports all live under ``data``.
     data_dir: Path = PROJECT_ROOT / "data"
@@ -62,9 +66,14 @@ class Settings(BaseSettings):
         """Directory for generated CSV / Excel files."""
         return self.data_dir / "exports"
 
+    @property
+    def screenshots_dir(self) -> Path:
+        """Directory holding browser screenshots captured as scraping evidence."""
+        return self.data_dir / "screenshots"
+
     def ensure_directories(self) -> None:
         """Create the storage directories if they do not exist yet."""
-        for directory in (self.raw_dir, self.runs_dir, self.exports_dir):
+        for directory in (self.raw_dir, self.runs_dir, self.exports_dir, self.screenshots_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
 

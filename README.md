@@ -8,29 +8,40 @@ A Python platform that turns public web pages into clean, queryable data: crawl 
 store the raw evidence, parse it into structured records, export reports and expose the
 result through a documented REST API.
 
-The repository is built in small, verifiable iterations. **Iteration 1 is complete**;
+The repository is built in small, verifiable iterations. **Iteration 2 is complete**;
 the roadmap below lists what comes next.
 
-## What works today (iteration 1)
+## What works today (iteration 2)
 
 - FastAPI service with interactive OpenAPI docs at `/docs` and a `GET /health` probe
 - A scraper registry so a new site is one class plus one registry line
-- One real source: [`books.toscrape.com`](https://books.toscrape.com), a public sandbox
-  bookstore published for scraping practice (20 books per listing page)
-- HTTP fetcher with the politeness rules a real client expects:
+- Three real sources, all on public sandboxes:
+  - [`books.toscrape.com`](https://books.toscrape.com) — bookstore catalogue (HTTP)
+  - [`quotes.toscrape.com`](https://quotes.toscrape.com) — quotes in the initial HTML (HTTP)
+  - [`quotes.toscrape.com/js`](https://quotes.toscrape.com/js) — same quotes rendered by
+    JavaScript, fetched with Playwright/Chromium
+- Two interchangeable fetch strategies behind one `Fetcher` protocol:
+  - `HttpFetcher` for server-rendered pages (fast, ~1 request/second per host)
+  - `PlaywrightFetcher` for JavaScript-rendered pages (headless Chromium, waits for a
+    selector instead of guessing with `sleep`)
+- Politeness rules shared by both strategies:
   - `robots.txt` is checked before the first request to a host
   - requests to the same host are throttled (`APP_REQUEST_DELAY_SECONDS`)
   - transient failures are retried with exponential backoff
   - a descriptive `User-Agent` identifies the crawler
+- Browser sources save a full-page screenshot per page under
+  `data/screenshots/<source>/page-001.png` as evidence of what was rendered
 - Raw HTML is archived under `data/raw/<source>/page-001.html`, so a parser can be
   re-run without hitting the site again (`"use_cache": true`)
-- BeautifulSoup parser extracting `title`, `price`, `currency`, `availability`,
-  `rating`, `product_url`, `image_url` and `collected_at`
+- BeautifulSoup parsers extracting structured records:
+  - books: `title`, `price`, `currency`, `availability`, `rating`, `product_url`,
+    `image_url`, `collected_at`
+  - quotes: `quote`, `author`, `tags`, `author_url`, `source_url`, `collected_at`
 - Every run is persisted: `data/runs/<run_id>/items.jsonl` plus a `summary.json`
-  with counters, duration and any page-level errors
+  with counters, duration, screenshots and any page-level errors
 - REST endpoints to list sources, start a run, list recent runs and read one run
 - A small CLI (`python -m app.cli`) for the same operations without a server
-- 14 pytest tests and Ruff lint/format checks
+- 22 pytest tests and Ruff lint/format checks
 
 ## Tech stack
 
@@ -39,13 +50,13 @@ the roadmap below lists what comes next.
 | Web framework | FastAPI + Uvicorn |
 | Validation / settings | Pydantic v2 + pydantic-settings |
 | HTTP client | httpx |
+| Browser automation | Playwright (Chromium) |
 | HTML parsing | BeautifulSoup 4 (`html.parser`) |
 | Logging | Python `logging`, structured single-line output |
 | Testing | pytest + FastAPI TestClient |
 | Linting / formatting | Ruff |
-| Storage (iteration 1) | JSONL + JSON on disk |
+| Storage (current) | JSONL + JSON on disk |
 | Storage (planned) | SQLAlchemy 2.0 + SQLite, Alembic migrations |
-| Browser automation (planned) | Playwright |
 | Data processing (planned) | pandas + openpyxl |
 | Scheduling (planned) | APScheduler |
 
@@ -62,8 +73,12 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements-dev.txt
+python -m playwright install chromium   # browser used by the quotes-js source
 copy .env.example .env        # Windows; use `cp` on macOS/Linux
 ```
+
+The tests and the two HTTP sources work without Chromium; install it before running
+`quotes-js`. On Linux CI images you may also need `python -m playwright install-deps`.
 
 Start the API:
 
@@ -77,25 +92,29 @@ Open <http://127.0.0.1:8000/docs> and use **POST /api/v1/scrape** with:
 { "source_key": "books-toscrape", "max_pages": 2 }
 ```
 
+Use `"source_key": "quotes-static"` for the server-rendered quotes page or
+`"source_key": "quotes-js"` to render the JavaScript version in Chromium.
+
 Or from the terminal:
 
 ```bash
 # PowerShell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/scrape `
   -ContentType "application/json" `
-  -Body '{"source_key": "books-toscrape", "max_pages": 2}'
+  -Body '{"source_key": "quotes-js", "max_pages": 1}'
 
 # curl
 curl -X POST http://127.0.0.1:8000/api/v1/scrape \
   -H "Content-Type: application/json" \
-  -d '{"source_key": "books-toscrape", "max_pages": 2}'
+  -d '{"source_key": "quotes-js", "max_pages": 1}'
 ```
 
 CLI equivalent:
 
 ```bash
 python -m app.cli sources
-python -m app.cli scrape --source books-toscrape --pages 2
+python -m app.cli scrape --source quotes-static --pages 1
+python -m app.cli scrape --source quotes-js --pages 1
 python -m app.cli scrape --source books-toscrape --pages 2 --use-cache
 ```
 
@@ -104,7 +123,7 @@ python -m app.cli scrape --source books-toscrape --pages 2 --use-cache
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Liveness probe with version and environment |
-| GET | `/api/v1/sources` | Registered sources and the fields they extract |
+| GET | `/api/v1/sources` | Registered sources, the fields they extract and whether they need a browser |
 | POST | `/api/v1/scrape` | Run a scrape job and persist the output |
 | GET | `/api/v1/runs` | Recent run summaries (`?limit=20`) |
 | GET | `/api/v1/runs/{run_id}` | One run summary |
@@ -125,12 +144,17 @@ configured limit, `502` when the site cannot be reached.
 ```
 data/
 ├── raw/
-│   └── books-toscrape/
-│       └── page-001.html          # original HTML, one file per page
+│   ├── books-toscrape/
+│   │   └── page-001.html          # original HTML, one file per page
+│   └── quotes-js/
+│       └── page-001.html          # DOM after JavaScript execution
+├── screenshots/
+│   └── quotes-js/
+│       └── page-001.png           # full-page screenshot of the rendered page
 └── runs/
     └── 20261116T040430-bbc88f/
         ├── items.jsonl            # one JSON object per record
-        └── summary.json           # counters, duration, errors, 3 sample items
+        └── summary.json           # counters, duration, errors, screenshots, samples
 ```
 
 `items.jsonl` is newline-delimited JSON: streaming friendly, append friendly, and easy
@@ -154,15 +178,22 @@ web-scraping-data-platform/
 │   │   └── logging.py             # Structured stdout logging
 │   ├── scrapers/
 │   │   ├── base.py                # BaseScraper + ScrapeOutcome
-│   │   ├── fetcher.py             # robots.txt, throttling, retries, HTML cache
-│   │   ├── books_toscrape.py      # Demo source implementation
+│   │   ├── fetcher.py             # Fetcher protocol + HttpFetcher + cache
+│   │   ├── playwright_fetcher.py  # Chromium rendering, selector waits, screenshots
+│   │   ├── politeness.py          # robots.txt checker + per-host throttle
+│   │   ├── books_toscrape.py      # Demo bookstore source
+│   │   ├── quotes.py              # quotes.toscrape.com (static + JS sources)
 │   │   └── registry.py            # Source registry
 │   ├── schemas/scrape.py          # Request / response models
 │   └── services/scrape_service.py # Orchestration and run persistence
 ├── tests/
-│   ├── fixtures/books_page_1.html # Static page used by parser tests
+│   ├── fixtures/
+│   │   ├── books_page_1.html      # Saved pages used by parser tests
+│   │   └── quotes_page_1.html
 │   ├── fakes.py                   # FakeFetcher test double
 │   ├── test_books_toscrape.py
+│   ├── test_quotes.py
+│   ├── test_browser_sources.py    # Fetcher selection + screenshot bookkeeping
 │   ├── test_scrape_service.py
 │   └── test_api.py
 ├── .env.example
@@ -189,7 +220,9 @@ Every setting can be provided as an environment variable with the `APP_` prefix,
 | `APP_RESPECT_ROBOTS_TXT` | `true` | Enforce robots.txt rules |
 | `APP_DEFAULT_MAX_PAGES` | `3` | CLI default when `--pages` is omitted |
 | `APP_MAX_PAGES_LIMIT` | `20` | Hard cap for API and CLI |
-| `APP_DATA_DIR` | `<repo>/data` | Root of raw data, runs and exports |
+| `APP_BROWSER_HEADLESS` | `true` | Run Chromium without a visible window |
+| `APP_BROWSER_TIMEOUT_MS` | `30000` | Navigation and selector-wait timeout |
+| `APP_DATA_DIR` | `<repo>/data` | Root of raw data, runs, screenshots and exports |
 
 ## Tests and quality checks
 
@@ -199,16 +232,19 @@ ruff check .
 ruff format --check .
 ```
 
-The suite never touches the network: the parser runs against a saved HTML fixture and
-the service/API tests use a fake fetcher or a stub service.
+The suite never touches the network: parsers run against saved HTML fixtures, the
+service/API tests use a fake fetcher or a stub service, and browser sources inject a fake
+`PlaywrightFetcher`, so no Chromium is launched during tests.
 
 ## Adding a new source
 
 1. Create `app/scrapers/<site>.py` with a `BaseScraper` subclass that implements
    `scrape(max_pages, use_cache=False)` and declares `source_key`, `display_name`,
    `description`, `base_url` and `record_fields`.
-2. Register the class in `app/scrapers/registry.py`.
-3. Add a static HTML fixture and a parser test; the API and CLI expose the source
+2. Set `requires_browser = True` when the listing only exists after JavaScript runs; the
+   service will inject a `PlaywrightFetcher` instead of `HttpFetcher`.
+3. Register the class in `app/scrapers/registry.py`.
+4. Add a static HTML fixture and a parser test; the API and CLI expose the source
    automatically.
 
 ## Ethical scraping
@@ -223,7 +259,7 @@ over full re-crawls. The raw HTML archive also makes audits possible after the f
 | Iteration | Scope | Status |
 | --- | --- | --- |
 | 1 | App skeleton, HTTP fetcher, BeautifulSoup scraper, run persistence, API + CLI, tests | Done |
-| 2 | Playwright for JavaScript-rendered pages, selector configuration, screenshots | Next |
+| 2 | Playwright for JavaScript-rendered pages, shared politeness rules, screenshots | Done |
 | 3 | SQLite persistence (SQLAlchemy 2.0), fingerprint-based de-duplication, query API | Planned |
 | 4 | CSV / Excel import with column mapping and a validation report | Planned |
 | 5 | Cleaning pipeline: price/date normalisation, whitespace, fuzzy duplicate detection | Planned |

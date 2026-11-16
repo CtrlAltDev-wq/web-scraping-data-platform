@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from app.scrapers.base import BaseScraper
 from app.scrapers.books_toscrape import BooksToscrapeScraper
-from app.scrapers.fetcher import HttpFetcher
+from app.scrapers.quotes import QuotesJsScraper, QuotesStaticScraper
 
 SCRAPER_CLASSES: dict[str, type[BaseScraper]] = {
     BooksToscrapeScraper.source_key: BooksToscrapeScraper,
+    QuotesStaticScraper.source_key: QuotesStaticScraper,
+    QuotesJsScraper.source_key: QuotesJsScraper,
 }
 
 
@@ -29,9 +31,13 @@ def available_sources() -> list[type[BaseScraper]]:
     return list(SCRAPER_CLASSES.values())
 
 
-def build_scraper(source_key: str, fetcher: HttpFetcher) -> BaseScraper:
-    """Instantiate the scraper registered for ``source_key``."""
-    scraper_class = SCRAPER_CLASSES.get(source_key)
-    if scraper_class is None:
-        raise UnknownSourceError(source_key)
-    return scraper_class(fetcher)
+def get_scraper_class(source_key: str) -> type[BaseScraper]:
+    """Return the scraper class registered for ``source_key``.
+
+    The service needs the class before it can choose a fetch strategy, because the
+    class declares whether the source requires a browser.
+    """
+    try:
+        return SCRAPER_CLASSES[source_key]
+    except KeyError:
+        raise UnknownSourceError(source_key) from None

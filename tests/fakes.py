@@ -15,6 +15,8 @@ class FakeFetcher:
         self.pages = pages
         self.requested_pages: list[int] = []
         self.cache_writes: list[Path] = []
+        self.screenshot_writes: list[Path] = []
+        self.wait_for_selectors: list[str | None] = []
 
     def get(
         self,
@@ -22,11 +24,21 @@ class FakeFetcher:
         *,
         cache_path: Path | None = None,
         use_cache: bool = False,
+        screenshot_path: Path | None = None,
+        wait_for_selector: str | None = None,
     ) -> FetchResult:
-        page = int(re.search(r"page-(\d+)", url).group(1))
+        page = int(re.search(r"page[-/](\d+)", url).group(1))
         self.requested_pages.append(page)
         if cache_path is not None:
             self.cache_writes.append(cache_path)
-        # Unknown pages behave like an empty catalogue page, which ends pagination.
+        if screenshot_path is not None:
+            self.screenshot_writes.append(screenshot_path)
+        self.wait_for_selectors.append(wait_for_selector)
+        # Unknown pages behave like an empty listing page, which ends pagination.
         html = self.pages.get(page, "<html><body></body></html>")
-        return FetchResult(url=url, status_code=200, html=html)
+        return FetchResult(
+            url=url,
+            status_code=200,
+            html=html,
+            screenshot_path=screenshot_path,
+        )

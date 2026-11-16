@@ -10,11 +10,13 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.schemas.scrape import ScrapeRunSummary, SourceInfo
-from app.scrapers.fetcher import HttpFetcher
+from app.scrapers.base import BaseScraper
+from app.scrapers.fetcher import Fetcher, HttpFetcher
+from app.scrapers.playwright_fetcher import PlaywrightFetcher
 from app.scrapers.registry import (
     UnknownSourceError,
     available_sources,
-    build_scraper,
+    get_scraper_class,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,9 +32,22 @@ class RunNotFoundError(LookupError):
 class ScrapeService:
     """Coordinates fetchers, scrapers and the on-disk run store."""
 
-    def __init__(self, settings: Settings, fetcher: HttpFetcher | None = None) -> None:
+    def __init__(self, settings: Settings, fetcher: Fetcher | None = None) -> None:
         self._settings = settings
         self._fetcher = fetcher or HttpFetcher(settings)
+        # An injected fetcher (tests, custom wiring) always wins, even for sources
+        # that would normally ask for a browser.
+        self._fetcher_injected = fetcher is not None
+
+    def _fetcher_for(self, scraper_class: type[BaseScraper]) -> Fetcher:
+        """Return the fetch strategy the scraper needs.
+
+        Browser sources get a fresh :class:`PlaywrightFetcher` so a long-lived API
+        process never keeps a Chromium instance around between requests.
+        """
+        if scraper_class.requires_browser and not self._fetcher_injected:
+            return PlaywrightFetcher(self._settings)
+        return self._fetcher
 
     def list_sources(self) -> list[SourceInfo]:
         """Describe every registered source for the API and the CLI."""
@@ -43,6 +58,7 @@ class ScrapeService:
                 description=scraper_class.description,
                 base_url=scraper_class.base_url,
                 fields=list(scraper_class.record_fields),
+                requires_browser=scraper_class.requires_browser,
             )
             for scraper_class in available_sources()
         ]
@@ -54,7 +70,8 @@ class ScrapeService:
         :class:`app.scrapers.fetcher.FetchError` when the first page cannot be fetched.
         """
         self._settings.ensure_directories()
-        scraper = build_scraper(source_key, self._fetcher)
+        scraper_class = get_scraper_class(source_key)
+        scraper = scraper_class(self._fetcher_for(scraper_class))
 
         run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%S}-{uuid4().hex[:6]}"
         started_at = datetime.now(UTC)
@@ -82,6 +99,7 @@ class ScrapeService:
             item_count=len(outcome.items),
             output_path=items_path.relative_to(self._settings.data_dir).as_posix(),
             errors=outcome.errors,
+            screenshots=outcome.screenshots,
             sample_items=outcome.items[:3],
         )
         (run_dir / "summary.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")

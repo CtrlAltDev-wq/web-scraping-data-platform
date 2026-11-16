@@ -56,8 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sources":
         for source in service.list_sources():
             print(f"{source.key}: {source.name}")
-            print(f"  url:    {source.base_url}")
-            print(f"  fields: {', '.join(source.fields)}")
+            print(f"  url:     {source.base_url}")
+            print(f"  fields:  {', '.join(source.fields)}")
+            print(f"  browser: {'yes' if source.requires_browser else 'no'}")
         return 0
 
     max_pages = args.pages or settings.default_max_pages
