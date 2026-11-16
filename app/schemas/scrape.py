@@ -44,6 +44,14 @@ class ScrapeRunSummary(BaseModel):
     duration_seconds: float
     pages_fetched: int
     item_count: int
+    items_inserted: int = Field(
+        default=0,
+        description="Records written to the database for the first time in this run",
+    )
+    items_duplicated: int = Field(
+        default=0,
+        description="Records already stored for this source and therefore skipped",
+    )
     output_path: str
     errors: list[str] = Field(default_factory=list)
     screenshots: list[str] = Field(

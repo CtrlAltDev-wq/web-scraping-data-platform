@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "Web Scraping & Data Extraction Platform"
-    app_version: str = "0.2.0"
+    app_version: str = "0.3.0"
     environment: str = "development"
     log_level: str = "INFO"
 
@@ -50,6 +50,8 @@ class Settings(BaseSettings):
 
     # Storage. Raw HTML, run outputs and future exports all live under ``data``.
     data_dir: Path = PROJECT_ROOT / "data"
+    # Leave empty to use the SQLite file under ``data_dir``.
+    database_url: str | None = None
 
     @property
     def raw_dir(self) -> Path:
@@ -70,6 +72,18 @@ class Settings(BaseSettings):
     def screenshots_dir(self) -> Path:
         """Directory holding browser screenshots captured as scraping evidence."""
         return self.data_dir / "screenshots"
+
+    @property
+    def db_path(self) -> Path:
+        """Default SQLite database file."""
+        return self.data_dir / "scraped.db"
+
+    @property
+    def resolved_database_url(self) -> str:
+        """Database URL, defaulting to SQLite inside ``data_dir``."""
+        if self.database_url:
+            return self.database_url
+        return f"sqlite:///{self.db_path.as_posix()}"
 
     def ensure_directories(self) -> None:
         """Create the storage directories if they do not exist yet."""

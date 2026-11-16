@@ -3,6 +3,8 @@
 Examples:
     python -m app.cli sources
     python -m app.cli scrape --source books-toscrape --pages 2
+    python -m app.cli items --source books-toscrape --limit 5
+    python -m app.cli stats
 """
 
 from __future__ import annotations
@@ -42,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-parse HTML saved in data/raw instead of downloading it again",
     )
+
+    items_parser = subparsers.add_parser("items", help="Query stored records")
+    items_parser.add_argument("--source", default=None, help="Filter by source key")
+    items_parser.add_argument("--q", default=None, help="Text search inside record payloads")
+    items_parser.add_argument("--limit", type=int, default=20, help="Page size (max 200)")
+    items_parser.add_argument("--offset", type=int, default=0, help="Records to skip")
+
+    subparsers.add_parser("stats", help="Show stored record counts per source")
     return parser
 
 
@@ -59,6 +69,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  url:     {source.base_url}")
             print(f"  fields:  {', '.join(source.fields)}")
             print(f"  browser: {'yes' if source.requires_browser else 'no'}")
+        return 0
+
+    if args.command == "items":
+        page = service.list_items(
+            source_key=args.source,
+            search=args.q,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        print(json.dumps(page.model_dump(mode="json"), indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "stats":
+        stats = [entry.model_dump() for entry in service.stats()]
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
         return 0
 
     max_pages = args.pages or settings.default_max_pages

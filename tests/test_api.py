@@ -1,16 +1,21 @@
-"""API tests: health, source listing and scrape-run wiring."""
+"""API tests: health, source listing, scrape runs and stored-record queries."""
 
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+from fakes import FakeFetcher
 from fastapi.testclient import TestClient
 
+from app.core.config import Settings
 from app.deps import get_scrape_service
 from app.main import app
 from app.schemas.scrape import ScrapeRunSummary
 from app.scrapers.registry import UnknownSourceError
-from app.services.scrape_service import RunNotFoundError
+from app.services.scrape_service import RunNotFoundError, ScrapeService
+
+FIXTURE = Path(__file__).parent / "fixtures" / "books_page_1.html"
 
 
 class StubScrapeService:
@@ -101,3 +106,33 @@ def test_missing_run_returns_404(stub_client: TestClient) -> None:
     response = stub_client.get("/api/v1/runs/20260101T000000-abcdef")
 
     assert response.status_code == 404
+
+
+def test_items_endpoints_query_stored_records(tmp_path: Path, client: TestClient) -> None:
+    settings = Settings(data_dir=tmp_path, request_delay_seconds=0, _env_file=None)
+    fetcher = FakeFetcher(settings, pages={1: FIXTURE.read_text(encoding="utf-8")})
+    service = ScrapeService(settings, fetcher=fetcher)
+    service.run("books-toscrape", max_pages=1)
+
+    app.dependency_overrides[get_scrape_service] = lambda: service
+    try:
+        page = client.get("/api/v1/items", params={"source_key": "books-toscrape", "limit": 2})
+        assert page.status_code == 200
+        body = page.json()
+        assert body["total"] == 3
+        assert len(body["items"]) == 2
+
+        item_id = body["items"][0]["id"]
+        detail = client.get(f"/api/v1/items/{item_id}")
+        assert detail.status_code == 200
+        assert detail.json()["data"]["title"] == "A Light in the Attic"
+
+        search = client.get("/api/v1/items", params={"q": "attic"})
+        assert search.json()["total"] == 1
+
+        stats = client.get("/api/v1/stats")
+        assert stats.json() == [{"source_key": "books-toscrape", "item_count": 3}]
+
+        assert client.get("/api/v1/items/999999").status_code == 404
+    finally:
+        app.dependency_overrides.clear()

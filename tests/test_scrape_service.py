@@ -58,6 +58,21 @@ def test_get_run_and_list_runs_read_persisted_files(tmp_path: Path) -> None:
     assert [run.run_id for run in service.list_runs()] == [summary.run_id]
 
 
+def test_second_run_does_not_duplicate_items(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+
+    first = service.run("books-toscrape", max_pages=1)
+    second = service.run("books-toscrape", max_pages=1)
+
+    assert (first.items_inserted, first.items_duplicated) == (3, 0)
+    assert (second.items_inserted, second.items_duplicated) == (0, 3)
+
+    page = service.list_items(source_key="books-toscrape")
+    assert page.total == 3
+    assert page.items[0].data["title"] == "A Light in the Attic"
+    assert service.stats()[0].item_count == 3
+
+
 def test_unknown_source_key_is_rejected(tmp_path: Path) -> None:
     service = make_service(tmp_path)
 

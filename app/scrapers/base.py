@@ -37,6 +37,9 @@ class BaseScraper(ABC):
     base_url: ClassVar[str]
     record_fields: ClassVar[tuple[str, ...]]
     requires_browser: ClassVar[bool] = False
+    # Fields that identify a record across runs. Volatile values (price, stock,
+    # timestamps) are intentionally excluded so a re-crawl updates nothing.
+    fingerprint_fields: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, fetcher: Fetcher) -> None:
         self._fetcher = fetcher

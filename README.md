@@ -8,10 +8,10 @@ A Python platform that turns public web pages into clean, queryable data: crawl 
 store the raw evidence, parse it into structured records, export reports and expose the
 result through a documented REST API.
 
-The repository is built in small, verifiable iterations. **Iteration 2 is complete**;
+The repository is built in small, verifiable iterations. **Iteration 3 is complete**;
 the roadmap below lists what comes next.
 
-## What works today (iteration 2)
+## What works today (iteration 3)
 
 - FastAPI service with interactive OpenAPI docs at `/docs` and a `GET /health` probe
 - A scraper registry so a new site is one class plus one registry line
@@ -37,11 +37,18 @@ the roadmap below lists what comes next.
   - books: `title`, `price`, `currency`, `availability`, `rating`, `product_url`,
     `image_url`, `collected_at`
   - quotes: `quote`, `author`, `tags`, `author_url`, `source_url`, `collected_at`
+- **SQLite persistence with idempotent crawls**: every record gets a SHA-256
+  fingerprint over the fields that define its identity, and a unique index on
+  `(source_key, fingerprint)` means re-running a source inserts `0` new rows instead
+  of duplicating data
+- **Query API** with pagination, per-source filtering and payload search, plus a
+  per-source stats endpoint
 - Every run is persisted: `data/runs/<run_id>/items.jsonl` plus a `summary.json`
-  with counters, duration, screenshots and any page-level errors
-- REST endpoints to list sources, start a run, list recent runs and read one run
+  with counters (including new vs duplicate records), duration, screenshots and errors
+- REST endpoints to list sources, start a run, list recent runs, read one run, query
+  stored records and read aggregate counts
 - A small CLI (`python -m app.cli`) for the same operations without a server
-- 22 pytest tests and Ruff lint/format checks
+- 29 pytest tests and Ruff lint/format checks
 
 ## Tech stack
 
@@ -52,11 +59,12 @@ the roadmap below lists what comes next.
 | HTTP client | httpx |
 | Browser automation | Playwright (Chromium) |
 | HTML parsing | BeautifulSoup 4 (`html.parser`) |
+| Persistence | SQLAlchemy 2.0 ORM + SQLite |
 | Logging | Python `logging`, structured single-line output |
 | Testing | pytest + FastAPI TestClient |
 | Linting / formatting | Ruff |
-| Storage (current) | JSONL + JSON on disk |
-| Storage (planned) | SQLAlchemy 2.0 + SQLite, Alembic migrations |
+| Run archive | JSONL + JSON on disk (audit trail next to the database) |
+| Migrations (planned) | Alembic |
 | Data processing (planned) | pandas + openpyxl |
 | Scheduling (planned) | APScheduler |
 
@@ -116,6 +124,9 @@ python -m app.cli sources
 python -m app.cli scrape --source quotes-static --pages 1
 python -m app.cli scrape --source quotes-js --pages 1
 python -m app.cli scrape --source books-toscrape --pages 2 --use-cache
+python -m app.cli items --source books-toscrape --limit 5
+python -m app.cli items --q "albert einstein"
+python -m app.cli stats
 ```
 
 ## API
@@ -127,6 +138,9 @@ python -m app.cli scrape --source books-toscrape --pages 2 --use-cache
 | POST | `/api/v1/scrape` | Run a scrape job and persist the output |
 | GET | `/api/v1/runs` | Recent run summaries (`?limit=20`) |
 | GET | `/api/v1/runs/{run_id}` | One run summary |
+| GET | `/api/v1/items` | Query stored records (`?source_key=&q=&limit=&offset=`) |
+| GET | `/api/v1/items/{item_id}` | One stored record with its metadata |
+| GET | `/api/v1/stats` | Stored record count per source |
 
 `POST /api/v1/scrape` body:
 
@@ -139,10 +153,19 @@ python -m app.cli scrape --source books-toscrape --pages 2 --use-cache
 Errors: `404` for an unknown source or run id, `400` when `max_pages` exceeds the
 configured limit, `502` when the site cannot be reached.
 
+Query the stored, de-duplicated records:
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/items?source_key=books-toscrape&limit=5"
+curl "http://127.0.0.1:8000/api/v1/items?q=albert%20einstein"
+curl "http://127.0.0.1:8000/api/v1/stats"
+```
+
 ## Output layout
 
 ```
 data/
+├── scraped.db                       # SQLite: de-duplicated queryable records
 ├── raw/
 │   ├── books-toscrape/
 │   │   └── page-001.html          # original HTML, one file per page
@@ -154,11 +177,13 @@ data/
 └── runs/
     └── 20261116T040430-bbc88f/
         ├── items.jsonl            # one JSON object per record
-        └── summary.json           # counters, duration, errors, screenshots, samples
+        └── summary.json           # counters, duration, screenshots, samples
 ```
 
-`items.jsonl` is newline-delimited JSON: streaming friendly, append friendly, and easy
-to load with `pandas.read_json(path, lines=True)` in a later iteration.
+`items.jsonl` remains the audit trail of a single run — streaming friendly and easy to
+load with `pandas.read_json(path, lines=True)`. The database is the queryable view:
+`items` stores the payload as JSON plus `source_key`, `fingerprint`, `run_id` and
+`first_seen_at`, with a unique index on `(source_key, fingerprint)`.
 
 ## Project structure
 
@@ -172,10 +197,15 @@ web-scraping-data-platform/
 │   │   ├── router.py              # Versioned API router
 │   │   └── endpoints/
 │   │       ├── health.py          # GET /health
-│   │       └── scrape.py          # Sources and scrape-run endpoints
+│   │       ├── scrape.py          # Sources and scrape-run endpoints
+│   │       └── items.py           # Stored-record queries and stats
 │   ├── core/
 │   │   ├── config.py              # Environment-driven settings
 │   │   └── logging.py             # Structured stdout logging
+│   ├── db/
+│   │   ├── database.py            # Engine + session factory
+│   │   ├── models.py              # ScrapedItem ORM model
+│   │   └── repository.py          # Idempotent inserts, filters, pagination
 │   ├── scrapers/
 │   │   ├── base.py                # BaseScraper + ScrapeOutcome
 │   │   ├── fetcher.py             # Fetcher protocol + HttpFetcher + cache
@@ -184,8 +214,12 @@ web-scraping-data-platform/
 │   │   ├── books_toscrape.py      # Demo bookstore source
 │   │   ├── quotes.py              # quotes.toscrape.com (static + JS sources)
 │   │   └── registry.py            # Source registry
-│   ├── schemas/scrape.py          # Request / response models
-│   └── services/scrape_service.py # Orchestration and run persistence
+│   ├── schemas/
+│   │   ├── scrape.py              # Scrape request / response models
+│   │   └── items.py               # Stored-record query models
+│   └── services/
+│       ├── fingerprint.py         # Normalisation + SHA-256 record identity
+│       └── scrape_service.py      # Orchestration, run persistence, queries
 ├── tests/
 │   ├── fixtures/
 │   │   ├── books_page_1.html      # Saved pages used by parser tests
@@ -194,6 +228,7 @@ web-scraping-data-platform/
 │   ├── test_books_toscrape.py
 │   ├── test_quotes.py
 │   ├── test_browser_sources.py    # Fetcher selection + screenshot bookkeeping
+│   ├── test_repository.py         # De-duplication, filters, pagination
 │   ├── test_scrape_service.py
 │   └── test_api.py
 ├── .env.example
@@ -222,7 +257,8 @@ Every setting can be provided as an environment variable with the `APP_` prefix,
 | `APP_MAX_PAGES_LIMIT` | `20` | Hard cap for API and CLI |
 | `APP_BROWSER_HEADLESS` | `true` | Run Chromium without a visible window |
 | `APP_BROWSER_TIMEOUT_MS` | `30000` | Navigation and selector-wait timeout |
-| `APP_DATA_DIR` | `<repo>/data` | Root of raw data, runs, screenshots and exports |
+| `APP_DATA_DIR` | `<repo>/data` | Root of raw data, runs, screenshots and the database |
+| `APP_DATABASE_URL` | empty | Override the default `sqlite:///<data>/scraped.db` URL |
 
 ## Tests and quality checks
 
@@ -233,19 +269,19 @@ ruff format --check .
 ```
 
 The suite never touches the network: parsers run against saved HTML fixtures, the
-service/API tests use a fake fetcher or a stub service, and browser sources inject a fake
-`PlaywrightFetcher`, so no Chromium is launched during tests.
+service/API tests use a fake fetcher or a stub service, browser sources inject a fake
+`PlaywrightFetcher`, and every test database lives in a temporary directory.
 
 ## Adding a new source
 
 1. Create `app/scrapers/<site>.py` with a `BaseScraper` subclass that implements
    `scrape(max_pages, use_cache=False)` and declares `source_key`, `display_name`,
-   `description`, `base_url` and `record_fields`.
+   `description`, `base_url`, `record_fields` and `fingerprint_fields`.
 2. Set `requires_browser = True` when the listing only exists after JavaScript runs; the
    service will inject a `PlaywrightFetcher` instead of `HttpFetcher`.
 3. Register the class in `app/scrapers/registry.py`.
 4. Add a static HTML fixture and a parser test; the API and CLI expose the source
-   automatically.
+   automatically, and database persistence plus de-duplication work unchanged.
 
 ## Ethical scraping
 
@@ -260,7 +296,7 @@ over full re-crawls. The raw HTML archive also makes audits possible after the f
 | --- | --- | --- |
 | 1 | App skeleton, HTTP fetcher, BeautifulSoup scraper, run persistence, API + CLI, tests | Done |
 | 2 | Playwright for JavaScript-rendered pages, shared politeness rules, screenshots | Done |
-| 3 | SQLite persistence (SQLAlchemy 2.0), fingerprint-based de-duplication, query API | Planned |
+| 3 | SQLite persistence (SQLAlchemy 2.0), fingerprint-based de-duplication, query API | Done |
 | 4 | CSV / Excel import with column mapping and a validation report | Planned |
 | 5 | Cleaning pipeline: price/date normalisation, whitespace, fuzzy duplicate detection | Planned |
 | 6 | Styled Excel report generation (summary sheet + data sheet + charts) | Planned |

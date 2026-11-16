@@ -63,6 +63,8 @@ class _QuotesScraper(BaseScraper):
 
     page_url_template: ClassVar[str]
     wait_for_selector: ClassVar[str | None] = None
+    # The quote text plus its author identifies a quote; tags can be edited.
+    fingerprint_fields = ("quote", "author")
 
     def scrape(self, max_pages: int, *, use_cache: bool = False) -> ScrapeOutcome:
         outcome = ScrapeOutcome()

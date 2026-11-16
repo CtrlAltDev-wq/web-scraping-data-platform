@@ -43,6 +43,8 @@ class BooksToscrapeScraper(BaseScraper):
         "image_url",
         "collected_at",
     )
+    # Title plus product URL stays stable even when the price or stock changes.
+    fingerprint_fields = ("title", "product_url")
 
     PAGE_URL_TEMPLATE = "https://books.toscrape.com/catalogue/page-{page}.html"
 

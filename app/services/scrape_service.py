@@ -1,4 +1,4 @@
-"""Scrape orchestration: run a source scraper and persist the result on disk."""
+"""Scrape orchestration: run a scraper, archive the output and store clean records."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from app.core.config import Settings
+from app.db.repository import ItemRepository
+from app.schemas.items import ItemPage, ScrapedItemOut, SourceStats
 from app.schemas.scrape import ScrapeRunSummary, SourceInfo
 from app.scrapers.base import BaseScraper
 from app.scrapers.fetcher import Fetcher, HttpFetcher
@@ -30,14 +32,20 @@ class RunNotFoundError(LookupError):
 
 
 class ScrapeService:
-    """Coordinates fetchers, scrapers and the on-disk run store."""
+    """Coordinates fetchers, scrapers, the run store and the item database."""
 
-    def __init__(self, settings: Settings, fetcher: Fetcher | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        fetcher: Fetcher | None = None,
+        repository: ItemRepository | None = None,
+    ) -> None:
         self._settings = settings
         self._fetcher = fetcher or HttpFetcher(settings)
         # An injected fetcher (tests, custom wiring) always wins, even for sources
         # that would normally ask for a browser.
         self._fetcher_injected = fetcher is not None
+        self._repository = repository or ItemRepository(settings)
 
     def _fetcher_for(self, scraper_class: type[BaseScraper]) -> Fetcher:
         """Return the fetch strategy the scraper needs.
@@ -88,6 +96,13 @@ class ScrapeService:
             encoding="utf-8",
         )
 
+        inserted, duplicated = self._repository.add_items(
+            scraper.source_key,
+            outcome.items,
+            fingerprint_fields=self._fingerprint_fields(scraper_class),
+            run_id=run_id,
+        )
+
         summary = ScrapeRunSummary(
             run_id=run_id,
             source_key=scraper.source_key,
@@ -97,6 +112,8 @@ class ScrapeService:
             duration_seconds=round((finished_at - started_at).total_seconds(), 3),
             pages_fetched=outcome.pages_fetched,
             item_count=len(outcome.items),
+            items_inserted=inserted,
+            items_duplicated=duplicated,
             output_path=items_path.relative_to(self._settings.data_dir).as_posix(),
             errors=outcome.errors,
             screenshots=outcome.screenshots,
@@ -104,12 +121,59 @@ class ScrapeService:
         )
         (run_dir / "summary.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")
         logger.info(
-            "Run %s finished: %s items from %s pages",
+            "Run %s finished: %s items from %s pages (%s new, %s duplicates)",
             run_id,
             summary.item_count,
             summary.pages_fetched,
+            inserted,
+            duplicated,
         )
         return summary
+
+    @staticmethod
+    def _fingerprint_fields(scraper_class: type[BaseScraper]) -> tuple[str, ...]:
+        """Identity fields for de-duplication.
+
+        Sources declare them explicitly. The fallback ignores ``*_at`` collection
+        timestamps so a default implementation never dedupes on crawl time.
+        """
+        return scraper_class.fingerprint_fields or tuple(
+            name for name in scraper_class.record_fields if not name.endswith("_at")
+        )
+
+    def list_items(
+        self,
+        *,
+        source_key: str | None = None,
+        search: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> ItemPage:
+        """Return one page of stored records with the total match count."""
+        total, rows = self._repository.list_items(
+            source_key=source_key,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+        return ItemPage(
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=[ScrapedItemOut.model_validate(row) for row in rows],
+        )
+
+    def get_item(self, item_id: int) -> ScrapedItemOut | None:
+        """Return one stored record, or ``None`` when the id is unknown."""
+        row = self._repository.get_item(item_id)
+        return None if row is None else ScrapedItemOut.model_validate(row)
+
+    def stats(self) -> list[SourceStats]:
+        """Return the stored record count per source."""
+        return [
+            SourceStats(source_key=source_key, item_count=count)
+            for source_key, count in self._repository.source_counts()
+        ]
 
     def list_runs(self, limit: int = 20) -> list[ScrapeRunSummary]:
         """Return the most recent run summaries, newest first."""
