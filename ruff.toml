@@ -1,0 +1,12 @@
+line-length = 100
+target-version = "py311"
+# Chinese learning notes are local-only and contain illustrative snippets.
+extend-exclude = ["doc_zh"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[format]
+quote-style = "double"
+line-ending = "auto"

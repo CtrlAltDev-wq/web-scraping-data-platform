@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Uvicorn (FastAPI)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "app.main:app",
+                "--host", "127.0.0.1",
+                "--port", "8000"
+                // 建议调试时不要加 "--reload"，以免断点命中不稳定
+            ],
+            "jinja": true,
+            "justMyCode": true
+        }
+    ]
+}
